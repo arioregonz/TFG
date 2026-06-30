@@ -1,0 +1,304 @@
+% 
+%  COMPARACIÓN MALLA INTERNA vs. MALLA EXTERNA (GMSH)
+%  Verificación de equivalencia antes de usar la malla externa
+%  con múltiples receptores (16 sensores, geometría circular).
+%
+%  Referencia: Espinosa et al. (2019), Cap. 4, pág. 73-76
+%  Criterio de validación: error TOF < 2% (pág. 73), correlación > 0.95
+% 
+clear; clc; close all;
+
+fprintf('\n');
+fprintf('  COMPARACIÓN MALLA INTERNA vs. EXTERNA\n');
+fprintf('\n');
+
+%% 1. ARCHIVOS Y PARÁMETROS
+
+file_int = 'Mesh_interna/Roble_sin_hueco_Malla/OUTPUT_FILES/AA.S0001.BXX.semd';
+file_ext = 'Mesh_externa/Roble_Rectang_Norm/OUTPUT_FILES/AA.S0001.BXX.semd';
+
+% Parámetros físicos (deben ser idénticos en ambos Par_file)
+DT_int  = 2.0e-7;   % s  — Par_file malla interna
+DT_ext  = 2.0e-7;   % s  — Par_file malla externa (VERIFICA que sea igual)
+% Si son distintos el análisis de lag en muestras no tiene sentido físico.
+
+%% 2. CARGA Y CORRECCIÓN DE ORIGEN TEMPORAL
+
+fprintf('--- Cargando sismogramas ---\n');
+
+if ~exist(file_int,'file')
+    error('No se encuentra: %s', file_int);
+end
+if ~exist(file_ext,'file')
+    error('No se encuentra: %s', file_ext);
+end
+
+A = load(file_int);
+B = load(file_ext);
+
+t1_raw = A(:,1);  s1_raw = A(:,2);
+t2_raw = B(:,1);  s2_raw = B(:,2);
+
+fprintf('  Interna: %d puntos, t=[%.4e, %.4e] s, dt=%.2e s\n', ...
+    length(t1_raw), t1_raw(1), t1_raw(end), t1_raw(2)-t1_raw(1));
+fprintf('  Externa: %d puntos, t=[%.4e, %.4e] s, dt=%.2e s\n', ...
+    length(t2_raw), t2_raw(1), t2_raw(end), t2_raw(2)-t2_raw(1));
+
+% CORRECCIÓN CRÍTICA: resetear origen temporal (elimina efecto USER_T0)
+% Si t(1) != 0, es porque USER_T0 != 0 en el Par_file.
+% La corrección correcta es: cambiar USER_T0=0.d0 y reejecutar SPECFEM2D.
+% Mientras tanto, esta línea elimina el offset para poder comparar:
+t1 = t1_raw - t1_raw(1);
+t2 = t2_raw - t2_raw(1);
+
+if abs(t1_raw(1)) > 1e-9
+    fprintf('\n  AVISO malla interna: t(1)=%.4e s (USER_T0 activo).\n', t1_raw(1));
+    fprintf('  Recomendación: pon USER_T0=0.d0 en ese Par_file y relanza.\n');
+end
+if abs(t2_raw(1)) > 1e-9
+    fprintf('\n  AVISO malla externa: t(1)=%.4e s (USER_T0 activo).\n', t2_raw(1));
+    fprintf('  Recomendación: pon USER_T0=0.d0 en ese Par_file y relanza.\n');
+end
+
+% Uniformizar longitud (recortar al más corto)
+N = min(length(t1), length(t2));
+t1 = t1(1:N);  s1_raw = s1_raw(1:N);
+t2 = t2(1:N);  s2_raw = s2_raw(1:N);
+
+% Verificar que DT coincide
+dt1 = t1_raw(2) - t1_raw(1);
+dt2 = t2_raw(2) - t2_raw(1);
+if abs(dt1-dt2)/dt1 > 0.01
+    warning('DT distintos: interna=%.2e, externa=%.2e. Los lags en muestras no serán comparables.', dt1, dt2);
+end
+
+%% 3. NORMALIZACIÓN
+
+% Normalizar por máximo de amplitud (para comparar formas de onda)
+A1_raw = max(abs(s1_raw));
+A2_raw = max(abs(s2_raw));
+s1 = s1_raw / A1_raw;
+s2 = s2_raw / A2_raw;
+
+fprintf('\n--- Amplitudes máximas (sin normalizar) ---\n');
+fprintf('  Interna: %.6e m\n', A1_raw);
+fprintf('  Externa: %.6e m\n', A2_raw);
+fprintf('  Ratio A_ext/A_int: %.4f\n', A2_raw/A1_raw);
+
+%% 4. TOF (método threshold, umbral=10%)
+%  Referencia: Cap. 3, pág. 39
+
+fprintf('\n--- Detección de TOF ---\n');
+
+lag_tof_muestras = NaN;
+lag_tof_seg      = NaN;
+cc_max           = NaN;
+
+umbral_frac = 0.10;   % 10% del máximo (tu script original)
+
+i1 = find(abs(s1) > umbral_frac, 1, 'first');
+i2 = find(abs(s2) > umbral_frac, 1, 'first');
+
+if isempty(i1) || isempty(i2)
+    error('No se detectó llegada de onda en al menos una señal. Revisa el umbral o los archivos.');
+end
+
+tof1 = t1(i1);
+tof2 = t2(i2);
+error_tof = 100 * abs(tof1-tof2) / max(tof1, eps);
+
+fprintf('  TOF interna (threshold %.0f%%): %.6e s = %.2f µs\n', ...
+    umbral_frac*100, tof1, tof1*1e6);
+fprintf('  TOF externa (threshold %.0f%%): %.6e s = %.2f µs\n', ...
+    umbral_frac*100, tof2, tof2*1e6);
+fprintf('  Error TOF: %.2f%%\n', error_tof);
+fprintf('  Criterio tesis (pág.73): error < 2%%  →  %s\n', ...
+    ternario(error_tof < 2, 'PASA ✓', 'NO PASA ✗'));
+% TOF por envolvente (más robusto que threshold para chirp)
+vw     = max(round(1/(36e3*DT_int)), 10);
+env1   = sqrt(movmean(s1.^2, vw));
+env2   = sqrt(movmean(s2.^2, vw));
+i0_env = round(0.130e-3/DT_int);
+i1_env = min(round(0.500e-3/DT_int), N);
+ie1    = find(env1(i0_env:i1_env) > 0.02*max(env1), 1, 'first');
+ie2    = find(env2(i0_env:i1_env) > 0.02*max(env2), 1, 'first');
+
+if ~isempty(ie1) && ~isempty(ie2)
+    tof1_env = (ie1 + i0_env - 1) * DT_int;
+    tof2_env = (ie2 + i0_env - 1) * DT_int;
+    error_tof_env = 100 * abs(tof1_env - tof2_env) / tof1_env;
+    fprintf('  TOF interna (envolvente):  %.2f µs\n', tof1_env*1e6);
+    fprintf('  TOF externa (envolvente):  %.2f µs\n', tof2_env*1e6);
+    fprintf('  Error TOF (envolvente): %.2f%%  →  %s\n', error_tof_env, ...
+        ternario(error_tof_env < 2, 'PASA ✓', 'NO PASA ✗'));
+    % Actualizar error_tof para la tabla resumen
+    error_tof = error_tof_env;
+    tof1 = tof1_env;
+    tof2 = tof2_env;
+else
+    fprintf('  AVISO: envolvente no detectó llegada en ventana [130,500] µs\n');
+end
+
+%% 5. CORRELACIÓN GLOBAL Y LOCAL
+
+fprintf('\n--- Correlación de señales ---\n');
+
+% Correlación global (señal completa)
+[c_full, lags_full] = xcorr(s1, s2, 'coeff');
+[c_full_max, ic_full] = max(c_full);
+lag_full_muestras = lags_full(ic_full);
+lag_full_seg = lag_full_muestras * dt1;
+
+fprintf('  Correlación máxima (señal completa): %.4f\n', c_full_max);
+fprintf('  Desfase óptimo:                      %d muestras = %.2f µs\n', ...
+    lag_full_muestras, lag_full_seg*1e6);
+
+% Alinear s2 con el lag óptimo y recalcular correlación
+s2_shift = circshift(s2, lag_full_muestras);
+R_alin = corrcoef(s1, s2_shift);
+fprintf('  Correlación tras alinear:            %.4f\n', R_alin(1,2));
+fprintf('  Criterio validación: correlación > 0.95  →  %s\n', ...
+    ternario(R_alin(1,2) > 0.95, 'PASA ✓', 'NO PASA ✗'));
+
+% Correlación espectral
+S1 = abs(fft(s1));
+S2 = abs(fft(s2));
+Rspec = corrcoef(S1, S2);
+idx_band = (f_vec >= 22e3) & (f_vec <= 50e3);
+R_spec = corrcoef(S1f(idx_band), S2f(idx_band));
+corr_espectral = R_spec(1,2);
+error_A = 100 * abs(A1_raw - A2_raw) / max(A1_raw, eps);
+fprintf('  Error amplitud máxima: %.2f%%\n', error_A);
+fprintf('  Criterio: < 5%%  →  %s\n', ternario(error_A < 5, 'PASA ✓', 'NO PASA ✗'));
+
+%% 7. ESPECTROS DE FRECUENCIA
+
+N_fft = 2^nextpow2(N);
+f_vec = (0:N_fft/2-1) / (N_fft * dt1);     % Hz
+S1f   = 2*abs(fft(s1, N_fft)) / N;
+S2f   = 2*abs(fft(s2, N_fft)) / N;
+S1f   = S1f(1:N_fft/2);
+S2f   = S2f(1:N_fft/2);
+
+% Frecuencia de pico de cada espectro
+[~,ip1] = max(S1f); [~,ip2] = max(S2f);
+f_peak1 = f_vec(ip1); f_peak2 = f_vec(ip2);
+fprintf('\n--- Contenido frecuencial ---\n');
+fprintf('  Frecuencia de pico interna: %.1f kHz\n', f_peak1/1e3);
+fprintf('  Frecuencia de pico externa: %.1f kHz\n', f_peak2/1e3);
+fprintf('  Referencia: chirp R3α centrado en 36 kHz (Tabla 5, pág.38)\n');
+
+%% 8. TABLA RESUMEN Y DIAGNÓSTICO
+
+fprintf('\n');
+fprintf('  TABLA RESUMEN DE VALIDACIÓN\n');
+fprintf('\n');
+fprintf('  %-35s %-12s %-12s %s\n','Métrica','Valor','Criterio','Estado');
+fprintf('  %s\n', repmat('-',1,72));
+
+metricas = {
+    'Error TOF [%%]',          sprintf('%.2f',error_tof),     '<2%%',    ternario(error_tof<2,'✓','✗');
+    'Correlación (alineada)',  sprintf('%.4f',R_alin(1,2)),   '>0.95',   ternario(R_alin(1,2)>0.95,'✓','✗');
+    'Correlación espectral',   sprintf('%.4f',Rspec(1,2)),    '>0.95',   ternario(Rspec(1,2)>0.95,'✓','✗');
+    'Error RMS (alineado)',    sprintf('%.4f',error_rms),     '<0.05',   ternario(error_rms<0.05,'✓','✗');
+    'Error energía [%%]',      sprintf('%.2f',error_E),       '<10%%',   ternario(error_E<10,'✓','✗');
+    'Error amplitud [%%]',     sprintf('%.2f',error_A),       '<5%%',    ternario(error_A<5,'✓','✗');
+    'Desfase (samples)',       sprintf('%d',lag_full_muestras),'~0',      ternario(abs(lag_full_muestras)<5,'✓','⚠');
+};
+
+for i = 1:size(metricas,1)
+    fprintf('  %-35s %-12s %-12s %s\n', metricas{i,1}, metricas{i,2}, metricas{i,3}, metricas{i,4});
+end
+
+n_pass = sum(cellfun(@(x) strcmp(x,'✓'), metricas(:,4)));
+fprintf('\n  Criterios superados: %d/%d\n', n_pass, size(metricas,1));
+if n_pass == size(metricas,1)
+    fprintf('  → MALLA EXTERNA VÁLIDA: equivalente a la malla interna.\n');
+elseif error_tof < 2 && R_alin(1,2) > 0.90
+    fprintf('  → MALLA EXTERNA ACEPTABLE: pequeñas diferencias de amplitud/energía\n');
+    fprintf('    (pueden deberse a la discretización de los bordes curvos en Gmsh).\n');
+else
+    fprintf('  → MALLA EXTERNA NO VALIDADA. Causas más probables:\n');
+    if abs(t2_raw(1)) > 1e-4
+        fprintf('    [1] USER_T0 != 0 en Par_file externo → corrige a USER_T0=0.d0\n');
+    end
+    if abs(dt1-dt2)/dt1 > 0.01
+        fprintf('    [2] DT distintos entre mallas interna y externa\n');
+    end
+    fprintf('    [3] Posición fuente/receptor o constantes de material distintas\n');
+    fprintf('    [4] Elemento de referencia de Gmsh distinto al interno\n');
+    fprintf('    → Revisa que ambos Par_file sean idénticos excepto en "read_external_mesh"\n');
+end
+
+% En lugar de comparar frecuencia de pico, comparar energía en banda
+energia_banda_int = sum(S1f(idx_band).^2);
+energia_total_int = sum(S1f.^2);
+fraccion_int = energia_banda_int/energia_total_int*100;
+% Idem para externa
+fprintf('  Fracción energía en banda 22-50kHz (interna): %.1f%%\n', fraccion_int);
+
+fprintf('  NOTA: ratio amplitud = %.0fx (diferencia de escala de fuente)\n', A1_raw/A2_raw);
+fprintf('  Las métricas de forma (TOF, correlación) son válidas.\n');
+fprintf('  Las métricas de magnitud (energía, amplitud) no son comparables.\n\n');
+
+%% 9. FIGURAS
+
+% Figura 1: Sismogramas superpuestos
+figure('Name','Comp. mallas - Sismogramas','Position',[50 50 900 600]);
+
+subplot(2,1,1);
+plot(t1*1e6, s1, 'b-', 'LineWidth',1.5, 'DisplayName','Malla interna');
+hold on;
+plot(t2*1e6, s2, 'r--','LineWidth',1.5, 'DisplayName','Malla externa');
+xline(tof1*1e6,'b:','LineWidth',1,'DisplayName',sprintf('TOF int=%.1f µs',tof1*1e6));
+xline(tof2*1e6,'r:','LineWidth',1,'DisplayName',sprintf('TOF ext=%.1f µs',tof2*1e6));
+xlabel('Tiempo [µs]'); ylabel('Amplitud normalizada');
+title(sprintf('Sismogramas (error TOF=%.2f%%, correlación=%.4f)', ...
+    error_tof, R_alin(1,2)), 'FontSize',10);
+legend('Location','northeast','FontSize',8);
+grid on;
+
+subplot(2,1,2);
+% Señales alineadas
+plot(t1*1e6, s1,       'b-',  'LineWidth',1.5, 'DisplayName','Interna');
+hold on;
+plot(t2*1e6, s2_shift, 'r--', 'LineWidth',1.5, 'DisplayName','Externa (alineada)');
+plot(t1*1e6, s1-s2_shift, 'k:', 'LineWidth',1, 'DisplayName',sprintf('Diferencia (RMS=%.4f)',error_rms));
+xlabel('Tiempo [µs]'); ylabel('Amplitud normalizada');
+title('Señales alineadas y diferencia', 'FontSize',10);
+legend('Location','northeast','FontSize',8);
+grid on;
+
+% Figura 2: Espectros
+figure('Name','Comp. mallas - Espectros','Position',[100 100 800 400]);
+idx_fplot = f_vec <= 150e3;
+plot(f_vec(idx_fplot)/1e3, S1f(idx_fplot), 'b-',  'LineWidth',1.5, 'DisplayName','Interna');
+hold on;
+plot(f_vec(idx_fplot)/1e3, S2f(idx_fplot), 'r--', 'LineWidth',1.5, 'DisplayName','Externa');
+xline(22, 'g:', 'LineWidth',1, 'DisplayName','f_0 chirp=22 kHz');
+xline(50, 'm:', 'LineWidth',1, 'DisplayName','f_1 chirp=50 kHz');
+xline(36, 'k:', 'LineWidth',1, 'DisplayName','Fc=36 kHz (tesis)');
+xlabel('Frecuencia [kHz]'); ylabel('|FFT| normalizada');
+title(sprintf('Espectros de amplitud (correlación espectral=%.4f)', Rspec(1,2)), 'FontSize',10);
+legend('Location','northeast','FontSize',8);
+grid on; xlim([0 120]);
+
+% Figura 3: Función de correlación cruzada
+figure('Name','Comp. mallas - Correlación','Position',[150 150 700 350]);
+lags_full_us = lags_full * dt1 * 1e6;
+plot(lags_full_us, c_full, 'b-', 'LineWidth',1.5);
+hold on;
+xline(lag_full_seg*1e6, 'r--', 'LineWidth',2, ...
+    'DisplayName', sprintf('Desfase óptimo=%.1f µs (%d muestras)', ...
+    lag_full_seg*1e6, lag_full_muestras));
+xlabel('Desfase [µs]'); ylabel('Correlación cruzada normalizada');
+title('Correlación cruzada: interna vs. externa', 'FontSize',10);
+legend('Location','northeast','FontSize',8);
+grid on;
+xlim([-200 200]);   % zoom en la zona de interés
+
+%% FUNCIONES LOCALES
+
+function s = ternario(cond, s_true, s_false)
+    if cond, s = s_true; else, s = s_false; end
+end
