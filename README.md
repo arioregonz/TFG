@@ -25,27 +25,16 @@ defecto mediante múltiples receptores.
 - **MATLAB** — postprocesado de sismogramas y generación de figuras
 - **Python 3** (con NumPy) — generación de la señal de excitación
 
-## Estructura del repositorio
-
-```
-.
-├── senal/              Generación de la señal chirp (Python)
-├── mallas/             Geometrías de Gmsh (.geo)
-├── configuracion/      Ficheros Par_file y señal de excitación
-├── scripts_matlab/     Postprocesado y validación (MATLAB)
-└── stations/           Configuración de receptores
-```
-
 ## Cómo reproducir los resultados
 
 1. Generar la señal de excitación:
    ```
-   python3 senal/generar_chirp.py
+   python3
    ```
 
 2. Generar la malla con Gmsh (geometría circular):
    ```
-   gmsh mallas/tronco_circular.geo -2 -format msh2 -o tronco.msh
+   gmsh Mesh_externa/tronco_circular.geo -2 -format msh2 -o tronco.msh
    ```
 
 3. Ejecutar la simulación con SPECFEM2D (ver Par_file en configuracion/).
